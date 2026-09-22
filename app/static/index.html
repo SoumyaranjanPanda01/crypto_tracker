@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto price tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; color: #1d2733; background: #f6f8fa; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 16px 0; }
+  select, input, button { font: inherit; padding: 6px 10px; border: 1px solid #c3ccd6; border-radius: 6px; background: #fff; }
+  button { cursor: pointer; }
+  button.main { background: #2457a6; color: #fff; border-color: #2457a6; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #2457a6; outline-offset: 2px; }
+  #status { padding: 10px 14px; border-radius: 6px; margin: 12px 0; }
+  .ok { background: #e3f2e8; color: #1e5a33; }
+  .bad { background: #fbe4e4; color: #8a1f1f; }
+  .info { background: #e8eef7; color: #24406b; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .grid div { background: #fff; border: 1px solid #dde3ea; border-radius: 6px; padding: 10px; }
+  .grid small { color: #5b6b7c; display: block; }
+  .grid b { font-size: 1.15rem; }
+  .up { color: #1e7a3c; } .down { color: #b3261e; }
+  #alert { display: none; font-weight: 600; }
+  .chart { background: #fff; border: 1px solid #dde3ea; border-radius: 6px; padding: 10px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Crypto price tracker</h1>
+<p>Prices in USD from CoinGecko. Times are UTC.</p>
+
+<div class="bar">
+  <select id="coin" onchange="load()"></select>
+  <button class="main" onclick="pull(false)">Pull now</button>
+  <button onclick="pull(true)">Simulate failed pull</button>
+</div>
+
+<div id="status" class="info">Loading...</div>
+<div id="alert" class="bad" style="padding:10px 14px;border-radius:6px;margin-bottom:12px"></div>
+
+<div class="grid">
+  <div><small>Current</small><b id="current">-</b></div>
+  <div><small>Change since last pull</small><b id="change">-</b></div>
+  <div><small id="avgLabel">Rolling average</small><b id="avg">-</b></div>
+  <div><small>Min (all stored)</small><b id="min">-</b></div>
+  <div><small>Max (all stored)</small><b id="max">-</b></div>
+  <div><small>Pulls stored</small><b id="points">-</b></div>
+</div>
+
+<div class="bar">
+  <label>From <input type="date" id="start" onchange="loadHistory()"></label>
+  <label>To <input type="date" id="end" onchange="loadHistory()"></label>
+</div>
+<div class="chart"><canvas id="chart" height="110"></canvas></div>
+
+<script>
+let chart;
+const money = v => v == null ? "-" : "$" + v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+const $ = id => document.getElementById(id);
+
+function setStatus(text, kind) {
+  $("status").textContent = text;
+  $("status").className = kind;
+}
+
+// fill the coin dropdown once, then load data
+async function init() {
+  const coins = await (await fetch("/coins")).json();
+  $("coin").innerHTML = coins.map(c => `<option>${c}</option>`).join("");
+  load();
+}
+
+async function load() {
+  try {
+    const d = await (await fetch("/latest?coin=" + $("coin").value)).json();
+    showLatest(d);
+    loadHistory();
+  } catch (e) {
+    setStatus("Can't reach the server. Check that the app is running.", "bad");
+  }
+}
+
+function showLatest(d) {
+  const p = d.last_pull;
+  // status banner: no data, last pull failed, or all good
+  if (!p) setStatus("No data yet. Click Pull now to fetch the first prices.", "info");
+  else if (p.status === "failed")
+    setStatus(`Last pull failed at ${p.pulled_at} (${p.error}). Showing last good data from ${d.as_of || "never"}.`, "bad");
+  else setStatus(`Last pull succeeded at ${p.pulled_at}.`, "ok");
+
+  $("current").textContent = money(d.current);
+  $("avgLabel").textContent = `Average of last ${d.window} pulls`;
+  $("avg").textContent = money(d.rolling_avg);
+  $("min").textContent = money(d.min);
+  $("max").textContent = money(d.max);
+  $("points").textContent = d.points;
+
+  if (d.change == null) {
+    $("change").textContent = "needs 2 pulls";
+    $("change").className = "";
+  } else {
+    const sign = d.change >= 0 ? "+" : "";
+    $("change").textContent = `${sign}${d.change.toFixed(2)} (${sign}${d.change_pct.toFixed(2)}%)`;
+    $("change").className = d.change >= 0 ? "up" : "down";
+  }
+
+  $("alert").style.display = d.alert ? "block" : "none";
+  $("alert").textContent = d.alert ? `Big move: ${d.change_pct.toFixed(2)}% since the previous pull.` : "";
+}
+
+async function loadHistory() {
+  const q = new URLSearchParams({ coin: $("coin").value });
+  if ($("start").value) q.set("start", $("start").value);
+  if ($("end").value) q.set("end", $("end").value);
+  const d = await (await fetch("/history?" + q)).json();
+
+  const labels = d.points.map(p => p.pulled_at);
+  const values = d.points.map(p => p.price);
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), {
+    type: "line",
+    data: { labels, datasets: [{ label: d.coin + " (USD)", data: values, borderColor: "#2457a6", tension: 0.2, pointRadius: 2 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { maxTicksLimit: 8 } } } }
+  });
+}
+
+// trigger a pull from the ui, fail=true fakes an api error
+async function pull(fail) {
+  setStatus("Pulling...", "info");
+  await fetch("/pull?fail=" + fail, { method: "POST" });
+  load();
+}
+
+init();
+setInterval(load, 60000); // refresh every minute so scheduled pulls show up
+</script>
+</body>
+</html>
